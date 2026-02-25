@@ -1,0 +1,47 @@
+{
+  "name": "wpt-compliance",
+  "version": "1.0.0",
+  "description": "Run web-platform-tests (WPT) against Bun/Node.js — downloads only the tests you need",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./fetcher": "./src/fetcher.js",
+    "./runner": "./src/runner.js"
+  },
+  "bin": {
+    "wpt": "./bin/cli.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "echo 'See README for usage'"
+  },
+  "keywords": [
+    "wpt",
+    "web-platform-tests",
+    "testharness",
+    "bun",
+    "node",
+    "testing",
+    "compliance"
+  ],
+  "author": "MPDieckmann",
+  "license": "MIT",
+  "homepage": "https://github.com/MPDieckmann/wpt-compliance#readme",
+  "bugs": {
+    "url": "https://github.com/MPDieckmann/wpt-compliance/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MPDieckmann/wpt-compliance.git"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "README.md"
+  ]
+}
