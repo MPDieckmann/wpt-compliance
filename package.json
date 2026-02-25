@@ -26,13 +26,13 @@
     }
   },
   "bin": {
-    "wpt": "./dist/cli.js"
+    "wpt": "dist/cli.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "prepublishOnly": "npm run build",
     "test": "echo 'See README for usage'"
   },
