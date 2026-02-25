@@ -1,4 +1,4 @@
-// src/fetcher.js — Download specific WPT test directories from GitHub
+// src/fetcher.ts — Download specific WPT test directories from GitHub
 //
 // Only fetches the files you need: test files (.any.js), their META: script=
 // dependencies, resource files (JSON data, helper scripts), and
@@ -13,10 +13,10 @@ import {
 } from "fs";
 import { join, dirname, relative } from "path";
 
-const WPT_REPO = "web-platform-tests/wpt";
-const WPT_BRANCH = "master";
-const RAW_BASE = `https://raw.githubusercontent.com/${WPT_REPO}/${WPT_BRANCH}`;
-const API_BASE = `https://api.github.com/repos/${WPT_REPO}`;
+export const WPT_REPO = "web-platform-tests/wpt";
+export const WPT_BRANCH = "master";
+export const RAW_BASE = `https://raw.githubusercontent.com/${WPT_REPO}/${WPT_BRANCH}`;
+export const API_BASE = `https://api.github.com/repos/${WPT_REPO}`;
 
 // ─── ANSI ───────────────────────────────────────────────────────────────────
 
@@ -26,18 +26,64 @@ const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+/** Options for {@link fetchFeature}. */
+export interface FetchFeatureOptions {
+  /** Where to store downloaded files. @default ".wpt-cache" (resolved from cwd) */
+  cacheDir?: string;
+  /** Re-download even if cached. @default false */
+  force?: boolean;
+  /** Show download progress details. @default false */
+  verbose?: boolean;
+  /** Only fetch test files matching these regex patterns. Non-test deps always included. */
+  include?: string[] | null;
+}
+
+/** Result returned by {@link fetchFeature}. */
+export interface FetchFeatureResult {
+  /** Absolute path to the cache directory. */
+  cacheDir: string;
+  /** Absolute paths to all downloaded files. */
+  files: string[];
+}
+
+/** Information about a locally-cached WPT feature. */
+export interface CachedFeatureInfo {
+  /** Feature name (e.g. "url", "IndexedDB"). */
+  feature: string;
+  /** Total number of cached files for this feature. */
+  files: number;
+  /** Number of `.any.js` test files. */
+  testFiles: number;
+  /** ISO 8601 timestamp of when the feature was fetched. */
+  fetchedAt: string;
+}
+
+interface GitHubEntry {
+  path: string;
+  type: string;
+  size: number;
+}
+
+interface WPTManifest {
+  feature: string;
+  fetchedAt: string;
+  branch: string;
+  files: string[];
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-async function fetchJSON(url) {
-  const res = await fetch(url, {
-    headers: {
-      Accept: "application/vnd.github.v3+json",
-      // Use GITHUB_TOKEN if available to avoid rate limits
-      ...(process.env.GITHUB_TOKEN
-        ? { Authorization: `token ${process.env.GITHUB_TOKEN}` }
-        : {}),
-    },
-  });
+async function fetchJSON(url: string): Promise<any> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.v3+json",
+  };
+  if (process.env.GITHUB_TOKEN) {
+    headers.Authorization = `token ${process.env.GITHUB_TOKEN}`;
+  }
+
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     if (res.status === 403) {
       throw new Error(
@@ -50,7 +96,7 @@ async function fetchJSON(url) {
   return res.json();
 }
 
-async function downloadFile(remotePath, localPath) {
+async function downloadFile(remotePath: string, localPath: string): Promise<string> {
   const url = `${RAW_BASE}/${remotePath}`;
   const res = await fetch(url);
   if (!res.ok) {
@@ -65,21 +111,16 @@ async function downloadFile(remotePath, localPath) {
 
 // ─── List directory contents recursively via GitHub API ─────────────────────
 
-/**
- * List all files in a GitHub directory, with optional recursion.
- * Returns an array of { path, type, size } objects.
- */
-async function listGitHubDir(remotePath, recursive = true) {
+async function listGitHubDir(remotePath: string, recursive = true): Promise<GitHubEntry[]> {
   const data = await fetchJSON(
     `${API_BASE}/contents/${remotePath}?ref=${WPT_BRANCH}`,
   );
 
   if (!Array.isArray(data)) {
-    // Single file
     return [{ path: data.path, type: data.type, size: data.size }];
   }
 
-  let results = [];
+  const results: GitHubEntry[] = [];
   for (const entry of data) {
     if (entry.type === "file") {
       results.push({ path: entry.path, type: "file", size: entry.size });
@@ -93,14 +134,13 @@ async function listGitHubDir(remotePath, recursive = true) {
 
 // ─── Parse META: script= from a test file to find dependencies ─────────────
 
-function parseMetaScripts(source) {
-  const scripts = [];
+function parseMetaScripts(source: string): string[] {
+  const scripts: string[] = [];
   for (const line of source.split("\n")) {
     const match = line.match(/^\/\/\s*META:\s*script=(.+)$/);
     if (match) {
       scripts.push(match[1].trim());
     }
-    // Stop at first non-comment, non-empty line
     if (
       line.trim() &&
       !line.startsWith("//") &&
@@ -112,13 +152,8 @@ function parseMetaScripts(source) {
   return scripts;
 }
 
-/**
- * Scan a test file for relative fetch() calls to local resources like JSON.
- * Returns an array of relative paths.
- */
-function parseInlineFetches(source) {
-  const paths = [];
-  // Match fetch("resources/foo.json") or fetch('resources/bar.json')
+function parseInlineFetches(source: string): string[] {
+  const paths: string[] = [];
   const re = /fetch\(\s*["']([^"']+\.json)["']\s*\)/g;
   let match;
   while ((match = re.exec(source)) !== null) {
@@ -135,15 +170,24 @@ function parseInlineFetches(source) {
 /**
  * Download WPT tests for a specific feature into a local cache directory.
  *
- * @param {string} feature - Feature directory name (e.g. "IndexedDB", "url")
- * @param {object} options
- * @param {string} options.cacheDir - Where to store downloaded files (default: .wpt-cache)
- * @param {boolean} options.force - Re-download even if cached
- * @param {boolean} options.verbose - Show download progress
- * @param {string[]} options.include - Only fetch files matching these patterns
- * @returns {Promise<{ cacheDir: string, files: string[] }>}
+ * Fetches `.any.js` test files, their `META: script=` dependencies,
+ * inline `fetch()` resource references (JSON), and `resources/testharness.js`.
+ *
+ * @example
+ * ```ts
+ * import { fetchFeature } from "wpt-compliance/fetcher";
+ *
+ * const { cacheDir, files } = await fetchFeature("url", {
+ *   cacheDir: ".wpt-cache",
+ *   force: false,
+ *   verbose: true,
+ * });
+ * ```
  */
-export async function fetchFeature(feature, options = {}) {
+export async function fetchFeature(
+  feature: string,
+  options: FetchFeatureOptions = {},
+): Promise<FetchFeatureResult> {
   const {
     cacheDir = join(process.cwd(), ".wpt-cache"),
     force = false,
@@ -157,7 +201,7 @@ export async function fetchFeature(feature, options = {}) {
 
   // Check if already downloaded (unless --force)
   if (!force && existsSync(manifestPath)) {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    const manifest: WPTManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     if (verbose) {
       console.log(
         `${DIM}Using cached WPT tests for "${feature}" (${manifest.files.length} files)${RESET}`,
@@ -179,10 +223,10 @@ export async function fetchFeature(feature, options = {}) {
 
   // 2. List all files in the feature directory
   process.stdout.write(`  ${DIM}Listing ${feature}/ ...${RESET}`);
-  let allFiles;
+  let allFiles: GitHubEntry[];
   try {
     allFiles = await listGitHubDir(feature);
-  } catch (err) {
+  } catch (err: any) {
     console.log(` ✗`);
     throw new Error(
       `Could not list WPT directory "${feature}": ${err.message}`,
@@ -192,11 +236,8 @@ export async function fetchFeature(feature, options = {}) {
 
   // 3. Filter to relevant files
   let filesToDownload = allFiles.filter((f) => {
-    // Always include .any.js test files
     if (f.path.endsWith(".any.js")) return true;
-    // Include JS helper files that could be META: script= dependencies
     if (f.path.endsWith(".js")) return true;
-    // Include JSON data files
     if (f.path.endsWith(".json")) return true;
     return false;
   });
@@ -205,17 +246,16 @@ export async function fetchFeature(feature, options = {}) {
   if (include && include.length > 0) {
     const includeRe = include.map((p) => new RegExp(p, "i"));
     filesToDownload = filesToDownload.filter((f) => {
-      // Always include non-.any.js files (they might be dependencies)
       if (!f.path.endsWith(".any.js")) return true;
       return includeRe.some((re) => re.test(f.path));
     });
   }
 
   // 4. Download files
-  const downloadedPaths = [];
+  const downloadedPaths: string[] = [];
   let downloaded = 0;
   const total = filesToDownload.length;
-  const pendingDeps = new Set();
+  const pendingDeps = new Set<string>();
 
   for (const file of filesToDownload) {
     const localPath = join(cacheDir, file.path);
@@ -223,13 +263,12 @@ export async function fetchFeature(feature, options = {}) {
 
     if (!force && existsSync(localPath)) {
       downloadedPaths.push(file.path);
-      // Still scan for deps
       if (file.path.endsWith(".any.js")) {
         const content = readFileSync(localPath, "utf-8");
         for (const dep of parseMetaScripts(content)) {
           if (dep.startsWith("/")) pendingDeps.add(dep.slice(1));
         }
-        for (const dep of parseInlineFetches(content, feature)) {
+        for (const dep of parseInlineFetches(content)) {
           if (dep.startsWith("/")) pendingDeps.add(dep.slice(1));
           else pendingDeps.add(`${feature}/${dep}`);
         }
@@ -242,7 +281,6 @@ export async function fetchFeature(feature, options = {}) {
         `  ${DIM}[${downloaded}/${total}] ${file.path} ...${RESET}`,
       );
     } else {
-      // Progress bar
       const pct = Math.round((downloaded / total) * 100);
       process.stdout.write(
         `\r  ${DIM}Downloading: ${downloaded}/${total} (${pct}%)${RESET}`,
@@ -253,23 +291,22 @@ export async function fetchFeature(feature, options = {}) {
       const content = await downloadFile(file.path, localPath);
       downloadedPaths.push(file.path);
 
-      // Scan .any.js files for META: script= dependencies
       if (file.path.endsWith(".any.js")) {
         for (const dep of parseMetaScripts(content)) {
           if (dep.startsWith("/")) {
-            pendingDeps.add(dep.slice(1)); // absolute from WPT root
+            pendingDeps.add(dep.slice(1));
           } else {
             pendingDeps.add(`${dirname(file.path)}/${dep}`);
           }
         }
-        for (const dep of parseInlineFetches(content, feature)) {
+        for (const dep of parseInlineFetches(content)) {
           if (dep.startsWith("/")) pendingDeps.add(dep.slice(1));
           else pendingDeps.add(`${dirname(file.path)}/${dep}`);
         }
       }
 
       if (verbose) console.log(` ${GREEN}✓${RESET}`);
-    } catch (err) {
+    } catch (err: any) {
       if (verbose) console.log(` ${YELLOW}✗ ${err.message}${RESET}`);
     }
   }
@@ -291,7 +328,7 @@ export async function fetchFeature(feature, options = {}) {
         await downloadFile(dep, localPath);
         downloadedPaths.push(dep);
         if (verbose) console.log(`  ${DIM}  ✓ ${dep}${RESET}`);
-      } catch (err) {
+      } catch (err: any) {
         if (verbose) console.log(`  ${DIM}  ✗ ${dep} (${err.message})${RESET}`);
       }
     }
@@ -299,20 +336,13 @@ export async function fetchFeature(feature, options = {}) {
 
   // 6. Write manifest
   mkdirSync(dirname(manifestPath), { recursive: true });
-  writeFileSync(
-    manifestPath,
-    JSON.stringify(
-      {
-        feature,
-        fetchedAt: new Date().toISOString(),
-        branch: WPT_BRANCH,
-        files: downloadedPaths,
-      },
-      null,
-      2,
-    ),
-    "utf-8",
-  );
+  const manifest: WPTManifest = {
+    feature,
+    fetchedAt: new Date().toISOString(),
+    branch: WPT_BRANCH,
+    files: downloadedPaths,
+  };
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
 
   const anyJsCount = downloadedPaths.filter((f) =>
     f.endsWith(".any.js"),
@@ -328,20 +358,30 @@ export async function fetchFeature(feature, options = {}) {
 }
 
 /**
- * List all locally-cached features.
+ * List all locally-cached WPT features.
+ *
+ * @example
+ * ```ts
+ * import { listCachedFeatures } from "wpt-compliance/fetcher";
+ *
+ * const features = listCachedFeatures();
+ * for (const f of features) {
+ *   console.log(`${f.feature}: ${f.testFiles} tests (fetched ${f.fetchedAt})`);
+ * }
+ * ```
  */
 export function listCachedFeatures(
-  cacheDir = join(process.cwd(), ".wpt-cache"),
-) {
+  cacheDir: string = join(process.cwd(), ".wpt-cache"),
+): CachedFeatureInfo[] {
   if (!existsSync(cacheDir)) return [];
 
-  const results = [];
+  const results: CachedFeatureInfo[] = [];
   for (const entry of readdirSync(cacheDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     if (entry.name === "resources" || entry.name === "common") continue;
     const manifest = join(cacheDir, entry.name, ".wpt-manifest.json");
     if (existsSync(manifest)) {
-      const data = JSON.parse(readFileSync(manifest, "utf-8"));
+      const data: WPTManifest = JSON.parse(readFileSync(manifest, "utf-8"));
       results.push({
         feature: entry.name,
         files: data.files.length,
@@ -352,5 +392,3 @@ export function listCachedFeatures(
   }
   return results;
 }
-
-export { RAW_BASE, API_BASE, WPT_REPO, WPT_BRANCH };

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// bin/cli.js — CLI entry point for wpt-compliance
+// src/cli.ts — CLI entry point for wpt-compliance
 //
 // Commands:
 //   wpt fetch <feature>          Download WPT test files for a feature
@@ -19,9 +19,9 @@
 //   -h, --help            Show help
 //   --version             Show version
 
-import { fetchFeature, listCachedFeatures } from "../src/fetcher.js";
-import { runWPT } from "../src/runner.js";
-import { loadConfig, DEFAULT_CACHE_DIR } from "../src/index.js";
+import { fetchFeature, listCachedFeatures } from "./fetcher.js";
+import { runWPT, type FeatureConfig } from "./runner.js";
+import { loadConfig, DEFAULT_CACHE_DIR } from "./index.js";
 import { resolve } from "path";
 import { readFileSync } from "fs";
 
@@ -29,7 +29,20 @@ import { readFileSync } from "fs";
 
 const args = process.argv.slice(2);
 
-const flags = {
+interface CLIFlags {
+  debug: boolean;
+  continue: boolean;
+  force: boolean;
+  filter: string;
+  timeout: number;
+  preload: string[];
+  config: string;
+  cacheDir: string;
+  help: boolean;
+  version: boolean;
+}
+
+const flags: CLIFlags = {
   debug: false,
   continue: false,
   force: false,
@@ -42,7 +55,7 @@ const flags = {
   version: false,
 };
 
-const positional = [];
+const positional: string[] = [];
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -121,7 +134,45 @@ if (flags.version) {
 const command = positional[0];
 const absCacheDir = resolve(process.cwd(), flags.cacheDir);
 
-async function main() {
+async function doRun(feature: string, files: string[]): Promise<void> {
+  // Load config
+  let featureConfig: FeatureConfig = {};
+  if (flags.config) {
+    featureConfig = await loadConfig(
+      resolve(process.cwd(), flags.config),
+      feature,
+    );
+  } else {
+    // Try default config locations
+    for (const name of ["wpt.config.js", "wpt.config.mjs"]) {
+      const path = resolve(process.cwd(), name);
+      try {
+        featureConfig = await loadConfig(path, feature);
+        if (Object.keys(featureConfig).length > 0) break;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const result = await runWPT(feature, {
+    wptRoot: absCacheDir,
+    files,
+    filter: flags.filter,
+    timeout: flags.timeout,
+    debug: flags.debug,
+    continueOnFail: flags.continue,
+    preload: flags.preload,
+    config: featureConfig,
+  });
+
+  // Exit code
+  if (result.failed > 0 || result.errors > 0) {
+    process.exit(1);
+  }
+}
+
+async function main(): Promise<void> {
   if (!command) {
     console.error(
       "Error: No command or feature specified. Use --help for usage.",
@@ -193,45 +244,7 @@ async function main() {
   await doRun(feature, files);
 }
 
-async function doRun(feature, files) {
-  // Load config
-  let featureConfig = {};
-  if (flags.config) {
-    featureConfig = await loadConfig(
-      resolve(process.cwd(), flags.config),
-      feature,
-    );
-  } else {
-    // Try default config locations
-    for (const name of ["wpt.config.js", "wpt.config.mjs"]) {
-      const path = resolve(process.cwd(), name);
-      try {
-        featureConfig = await loadConfig(path, feature);
-        if (Object.keys(featureConfig).length > 0) break;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  const result = await runWPT(feature, {
-    wptRoot: absCacheDir,
-    files,
-    filter: flags.filter,
-    timeout: flags.timeout,
-    debug: flags.debug,
-    continueOnFail: flags.continue,
-    preload: flags.preload,
-    config: featureConfig,
-  });
-
-  // Exit code
-  if (result.failed > 0 || result.errors > 0) {
-    process.exit(1);
-  }
-}
-
-main().catch((err) => {
+main().catch((err: Error) => {
   console.error(`\n❌ ${err.message}\n`);
   if (flags.debug && err.stack) console.error(err.stack);
   process.exit(1);

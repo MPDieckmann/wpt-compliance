@@ -1,8 +1,8 @@
-// src/runner.js — Core WPT test runner, importable as a module
+// src/runner.ts — Core WPT test runner, importable as a module
 //
 // Can be used standalone or integrated into your own test pipeline:
 //   import { runWPT } from "wpt-compliance/runner";
-//   const results = await runWPT("url", { cacheDir: ".wpt-cache" });
+//   const results = await runWPT("url", { wptRoot: ".wpt-cache" });
 
 import { readFileSync, existsSync, readdirSync } from "fs";
 import { resolve, dirname, join, relative } from "path";
@@ -13,7 +13,7 @@ const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 
-const TEST_STATUSES = {
+const TEST_STATUSES: Record<number, { label: string; color: string }> = {
   0: { label: "PASS", color: "\x1b[32m" },
   1: { label: "FAIL", color: "\x1b[31m" },
   2: { label: "TIMEOUT", color: "\x1b[33m" },
@@ -21,10 +21,152 @@ const TEST_STATUSES = {
   4: { label: "PRECONDITION_FAILED", color: "\x1b[35m" },
 };
 
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+/** Parsed `// META:` directives from a WPT test file. */
+export interface TestMeta {
+  /** Target globals (e.g. `["window", "worker"]`). */
+  global: string[];
+  /** Paths from `META: script=` directives. */
+  scripts: string[];
+  /** Timeout hint: `"normal"` or `"long"`. */
+  timeout: string;
+  /** Test title from `META: title=`. */
+  title: string;
+  /** URL variants from `META: variant=`. */
+  variant: string[];
+}
+
+/**
+ * Individual test result within a test file.
+ * Status codes: 0=PASS, 1=FAIL, 2=TIMEOUT, 3=NOTRUN, 4=PRECONDITION_FAILED
+ */
+export interface TestResult {
+  /** Test name / description. */
+  name: string;
+  /** Numeric status code. */
+  status: number;
+  /** Failure message, if any. */
+  message: string | null;
+  /** Stack trace, if available. */
+  stack: string | null;
+}
+
+/** Harness-level status object returned by `add_completion_callback`. */
+export interface HarnessStatus {
+  status: number;
+  message: string | null;
+  stack: string | null;
+}
+
+/** Raw results collected from a single test file execution. */
+export interface TestFileResults {
+  tests: TestResult[];
+  status: HarnessStatus | null;
+  asserts: unknown[];
+}
+
+/** Result of running a single test file via {@link runTestFile}. */
+export interface RunTestFileResult {
+  /** Relative path of the test file (from wptRoot). */
+  file: string;
+  /** Error message if the test errored/timed out, otherwise `null`. */
+  error: string | null;
+  /** Collected test results. */
+  results: TestFileResults;
+}
+
+/** Per-feature configuration object (from `wpt.config.js`). */
+export interface FeatureConfig {
+  /** Scripts to preload before each test file (relative to wptRoot). */
+  preload?: string[];
+  /** Setup function called before each test file. */
+  setup?: (context: {
+    testFilePath: string;
+    testName: string;
+    meta: TestMeta;
+    globalThis: typeof globalThis;
+  }) => void | Promise<void>;
+  /** Cleanup function called between test files to reset state. */
+  cleanup?: () => void;
+  /** Additional global variable names to clean up between test runs. */
+  globals?: string[];
+  /** Per-feature timeout in ms. Overrides the global timeout option. */
+  timeout?: number;
+}
+
+/** Options for {@link runTestFile}. */
+export interface RunTestFileOptions {
+  /** Root directory containing WPT files. @default `process.cwd()` */
+  wptRoot?: string;
+  /** Base timeout in milliseconds. ×6 for `META: timeout=long`. @default 30000 */
+  timeout?: number;
+  /** Preload script paths to import before each test. */
+  preload?: string[];
+  /** Per-feature configuration from `wpt.config.js`. */
+  featureConfig?: FeatureConfig;
+  /** Enable debug logging. @default false */
+  debug?: boolean;
+}
+
+/** Per-file summary within {@link RunWPTSummary.files}. */
+export interface FileResult {
+  file: string;
+  passed: number;
+  failed: number;
+  total: number;
+  error: string | null;
+  tests: TestResult[];
+}
+
+/** Summary returned by {@link runWPT}. */
+export interface RunWPTSummary {
+  feature: string;
+  passed: number;
+  failed: number;
+  errors: number;
+  total: number;
+  filesRan: number;
+  filesTotal: number;
+  aborted: boolean;
+  files: FileResult[];
+}
+
+/** Options for {@link runWPT}. */
+export interface RunWPTOptions {
+  /** Root directory containing WPT files. @default `process.cwd()` */
+  wptRoot?: string;
+  /** Specific test file names to run. If empty, all `.any.js` files are discovered. */
+  files?: string[];
+  /** Regex filter applied to test file paths. */
+  filter?: string;
+  /** Base timeout in milliseconds. @default 30000 */
+  timeout?: number;
+  /** Enable verbose/debug output. @default false */
+  debug?: boolean;
+  /** Continue running after test failures. @default true */
+  continueOnFail?: boolean;
+  /** Preload script paths to import before each test. */
+  preload?: string[];
+  /** Per-feature configuration (same shape as a `wpt.config.js` entry). */
+  config?: FeatureConfig;
+  /** Suppress all console output. @default false */
+  silent?: boolean;
+}
+
 // ─── META parser ────────────────────────────────────────────────────────────
 
-export function parseMeta(source) {
-  const meta = {
+/**
+ * Parse `// META:` directives from a WPT test file source.
+ *
+ * @example
+ * ```ts
+ * const meta = parseMeta(source);
+ * console.log(meta.scripts); // ["/resources/testharness.js", "./support.js"]
+ * ```
+ */
+export function parseMeta(source: string): TestMeta {
+  const meta: TestMeta = {
     global: ["window", "worker"],
     scripts: [],
     timeout: "normal",
@@ -68,8 +210,9 @@ export function parseMeta(source) {
 
 // ─── File discovery ─────────────────────────────────────────────────────────
 
-export function findTestFiles(dir) {
-  const results = [];
+/** Recursively find all `.any.js` test files in a directory. */
+export function findTestFiles(dir: string): string[] {
+  const results: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -86,16 +229,21 @@ export function findTestFiles(dir) {
 /**
  * Run a single WPT test file.
  *
- * @param {string} testFilePath - Absolute path to the .any.js file
- * @param {object} options
- * @param {string} options.wptRoot      - Root of WPT files (for resolving /resources/...)
- * @param {number} options.timeout      - Base timeout in ms (default 30000)
- * @param {string[]} options.preload    - Preload script paths to import before each test
- * @param {object} options.featureConfig - Config from wpt.config.js for this feature
- * @param {boolean} options.debug       - Enable debug logging
- * @returns {Promise<{ file: string, error: string|null, results: object }>}
+ * @example
+ * ```ts
+ * import { runTestFile } from "wpt-compliance/runner";
+ *
+ * const result = await runTestFile("/path/to/url/url-constructor.any.js", {
+ *   wptRoot: ".wpt-cache",
+ *   timeout: 30000,
+ * });
+ * console.log(result.results.tests.length, "tests ran");
+ * ```
  */
-export async function runTestFile(testFilePath, options = {}) {
+export async function runTestFile(
+  testFilePath: string,
+  options: RunTestFileOptions = {},
+): Promise<RunTestFileResult> {
   const {
     wptRoot = process.cwd(),
     timeout = 30000,
@@ -110,7 +258,7 @@ export async function runTestFile(testFilePath, options = {}) {
   const testDir = dirname(testFilePath);
   const testName = relative(wptRoot, testFilePath);
 
-  const results = {
+  const results: TestFileResults = {
     tests: [],
     status: null,
     asserts: [],
@@ -118,7 +266,7 @@ export async function runTestFile(testFilePath, options = {}) {
 
   const timeoutMs = meta.timeout === "long" ? timeout * 6 : timeout;
 
-  return new Promise((resolveRun) => {
+  return new Promise<RunTestFileResult>((resolveRun) => {
     const timer = setTimeout(() => {
       resolveRun({
         file: testName,
@@ -130,14 +278,14 @@ export async function runTestFile(testFilePath, options = {}) {
     async function execute() {
       const testharnessSource = readFileSync(testharnessPath, "utf-8");
 
-      if (typeof globalThis.self === "undefined") {
-        globalThis.self = globalThis;
+      if (typeof (globalThis as any).self === "undefined") {
+        (globalThis as any).self = globalThis;
       }
 
       cleanupGlobals(featureConfig);
 
       // GLOBAL shim
-      globalThis.GLOBAL = {
+      (globalThis as any).GLOBAL = {
         isWindow: () => false,
         isShadowRealm: () => false,
         isWorker: () => false,
@@ -146,8 +294,12 @@ export async function runTestFile(testFilePath, options = {}) {
         isServiceWorker: () => false,
       };
 
-      if (typeof globalThis.subsetTestByKey === "undefined") {
-        globalThis.subsetTestByKey = function (key, testFunc, ...args) {
+      if (typeof (globalThis as any).subsetTestByKey === "undefined") {
+        (globalThis as any).subsetTestByKey = function (
+          _key: string,
+          testFunc: Function,
+          ...args: any[]
+        ) {
           return testFunc(...args);
         };
       }
@@ -157,22 +309,24 @@ export async function runTestFile(testFilePath, options = {}) {
       testharnessFunc.call(globalThis);
 
       // completion callback
-      globalThis.add_completion_callback((tests, harnessStatus, asserts) => {
-        clearTimeout(timer);
-        results.tests = tests.map((t) => ({
-          name: t.name,
-          status: t.status,
-          message: t.message,
-          stack: t.stack,
-        }));
-        results.status = harnessStatus;
-        results.asserts = asserts;
-        resolveRun({ file: testName, results, error: null });
-      });
+      (globalThis as any).add_completion_callback(
+        (tests: any[], harnessStatus: any, asserts: any[]) => {
+          clearTimeout(timer);
+          results.tests = tests.map((t) => ({
+            name: t.name,
+            status: t.status,
+            message: t.message,
+            stack: t.stack,
+          }));
+          results.status = harnessStatus;
+          results.asserts = asserts;
+          resolveRun({ file: testName, results, error: null });
+        },
+      );
 
       // mock location
-      if (typeof globalThis.location === "undefined") {
-        globalThis.location = {
+      if (typeof (globalThis as any).location === "undefined") {
+        (globalThis as any).location = {
           search: "",
           href: `file://${testFilePath}`,
           origin: "file://",
@@ -185,11 +339,12 @@ export async function runTestFile(testFilePath, options = {}) {
         };
       }
 
-      globalThis.get_title = globalThis.get_title || (() => testName);
+      (globalThis as any).get_title =
+        (globalThis as any).get_title || (() => testName);
 
       // META: script= dependencies
       for (const scriptPath of meta.scripts) {
-        let resolvedPath;
+        let resolvedPath: string;
         if (scriptPath.startsWith("/")) {
           resolvedPath = join(wptRoot, scriptPath);
         } else {
@@ -209,7 +364,10 @@ export async function runTestFile(testFilePath, options = {}) {
 
       // Patch fetch for local files
       const originalFetch = globalThis.fetch;
-      globalThis.fetch = function patchedFetch(input, init) {
+      globalThis.fetch = function patchedFetch(
+        input: string | URL | Request,
+        init?: RequestInit,
+      ): Promise<Response> {
         if (
           typeof input === "string" &&
           !input.startsWith("http://") &&
@@ -217,7 +375,7 @@ export async function runTestFile(testFilePath, options = {}) {
           !input.startsWith("blob:") &&
           !input.startsWith("data:")
         ) {
-          let filePath;
+          let filePath: string;
           if (input.startsWith("/")) {
             filePath = join(wptRoot, input);
           } else {
@@ -237,7 +395,7 @@ export async function runTestFile(testFilePath, options = {}) {
             );
           }
         }
-        return originalFetch.call(globalThis, input, init);
+        return originalFetch.call(globalThis, input, init!);
       };
 
       // Preloads from config
@@ -263,14 +421,15 @@ export async function runTestFile(testFilePath, options = {}) {
       const testFunc = new Function(testSource);
       testFunc.call(globalThis);
 
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise<void>((r) => setTimeout(r, 0));
 
       if (results.tests.length === 0 && results.status === null) {
-        if (typeof globalThis.done === "function") globalThis.done();
+        if (typeof (globalThis as any).done === "function")
+          (globalThis as any).done();
       }
     }
 
-    execute().catch((err) => {
+    execute().catch((err: Error) => {
       clearTimeout(timer);
       resolveRun({
         file: testName,
@@ -283,7 +442,7 @@ export async function runTestFile(testFilePath, options = {}) {
 
 // ─── Cleanup ────────────────────────────────────────────────────────────────
 
-const WPT_GLOBALS = [
+const WPT_GLOBALS: string[] = [
   "test",
   "async_test",
   "promise_test",
@@ -343,21 +502,27 @@ const WPT_GLOBALS = [
   "subsetTestByKey",
 ];
 
-function cleanupGlobals(featureConfig = {}) {
+function cleanupGlobals(featureConfig: FeatureConfig = {}): void {
   for (const name of WPT_GLOBALS) {
     try {
-      delete globalThis[name];
-    } catch (e) {}
+      delete (globalThis as any)[name];
+    } catch (_e) {
+      // ignore
+    }
   }
   for (const name of featureConfig.globals || []) {
     try {
-      delete globalThis[name];
-    } catch (e) {}
+      delete (globalThis as any)[name];
+    } catch (_e) {
+      // ignore
+    }
   }
   if (typeof featureConfig.cleanup === "function") {
     try {
       featureConfig.cleanup();
-    } catch (e) {}
+    } catch (_e) {
+      // ignore
+    }
   }
 }
 
@@ -366,20 +531,25 @@ function cleanupGlobals(featureConfig = {}) {
 /**
  * Run all WPT tests for a feature. This is the main programmatic API.
  *
- * @param {string} feature        - Feature name (e.g. "url", "IndexedDB")
- * @param {object} options
- * @param {string} options.wptRoot       - Root directory containing WPT files
- * @param {string[]} options.files       - Specific test file names to run
- * @param {string} options.filter        - Regex filter for file names
- * @param {number} options.timeout       - Timeout in ms
- * @param {boolean} options.debug        - Verbose output
- * @param {boolean} options.continueOnFail - Continue after failure
- * @param {string[]} options.preload     - Preload scripts
- * @param {object} options.config        - Feature config (same as wpt.config.js entry)
- * @param {boolean} options.silent       - Suppress all console output
- * @returns {Promise<{ passed: number, failed: number, total: number, files: object[] }>}
+ * Discovers `.any.js` files, evaluates each in a sandboxed global scope
+ * with `testharness.js`, and collects results.
+ *
+ * @example
+ * ```ts
+ * import { runWPT } from "wpt-compliance/runner";
+ *
+ * const summary = await runWPT("url", {
+ *   wptRoot: ".wpt-cache",
+ *   debug: true,
+ *   continueOnFail: true,
+ * });
+ * console.log(`${summary.passed}/${summary.total} passed`);
+ * ```
  */
-export async function runWPT(feature, options = {}) {
+export async function runWPT(
+  feature: string,
+  options: RunWPTOptions = {},
+): Promise<RunWPTSummary> {
   const {
     wptRoot = process.cwd(),
     files: fileArgs = [],
@@ -392,7 +562,7 @@ export async function runWPT(feature, options = {}) {
     silent = false,
   } = options;
 
-  const log = silent ? () => {} : console.log.bind(console);
+  const log = silent ? (() => {}) : console.log.bind(console);
 
   const featurePath = resolve(wptRoot, feature);
   if (!existsSync(featurePath)) {
@@ -400,7 +570,7 @@ export async function runWPT(feature, options = {}) {
   }
 
   // Discover test files
-  let testFiles;
+  let testFiles: string[];
   if (fileArgs.length > 0) {
     testFiles = [];
     for (const name of fileArgs) {
@@ -433,7 +603,7 @@ export async function runWPT(feature, options = {}) {
   log(`\n🔍 Found ${testFiles.length} .any.js test file(s) in "${feature}"\n`);
 
   // Run
-  const fileResults = [];
+  const fileResults: FileResult[] = [];
   let totalPass = 0,
     totalFail = 0,
     totalError = 0;
@@ -443,7 +613,7 @@ export async function runWPT(feature, options = {}) {
     const relPath = relative(wptRoot, testFile);
     const result = await runTestFile(testFile, {
       wptRoot,
-      timeout,
+      timeout: featureConfig.timeout || timeout,
       preload,
       featureConfig,
       debug,
@@ -520,7 +690,7 @@ export async function runWPT(feature, options = {}) {
             log(
               t.stack
                 .split("\n")
-                .map((l) => `      ${DIM}${l}${RESET}`)
+                .map((l: string) => `      ${DIM}${l}${RESET}`)
                 .join("\n"),
             );
         }
@@ -540,7 +710,7 @@ export async function runWPT(feature, options = {}) {
   }
 
   // Summary
-  const summary = {
+  const summary: RunWPTSummary = {
     feature,
     passed: totalPass,
     failed: totalFail,
