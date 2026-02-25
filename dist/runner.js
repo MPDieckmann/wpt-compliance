@@ -9,6 +9,18 @@ import { resolve, dirname, join, relative } from "path";
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
+const CYAN = "\x1b[36m";
+const YELLOW = "\x1b[33m";
+const RED = "\x1b[31m";
+/** Format a duration in ms as a human-readable string (e.g. `5.2s` or `1:05`). */
+function formatElapsed(ms) {
+    const s = ms / 1000;
+    if (s < 60)
+        return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const rem = Math.floor(s % 60);
+    return `${m}:${rem.toString().padStart(2, "0")}`;
+}
 const TEST_STATUSES = {
     0: { label: "PASS", color: "\x1b[32m" },
     1: { label: "FAIL", color: "\x1b[31m" },
@@ -482,6 +494,31 @@ export async function runWPT(feature, options = {}) {
     let aborted = false;
     for (const testFile of testFiles) {
         const relPath = relative(wptRoot, testFile);
+        // Determine actual timeout for this file (META: timeout=long → ×6)
+        const testSource = readFileSync(testFile, "utf-8");
+        const meta = parseMeta(testSource);
+        const baseTimeout = featureConfig.timeout || timeout;
+        const fileTimeout = meta.timeout === "long" ? baseTimeout * 6 : baseTimeout;
+        // Show live timer while the test file is running (TTY only)
+        const startTime = Date.now();
+        let timerInterval = null;
+        if (!silent && process.stdout.isTTY) {
+            const showTimer = () => {
+                const elapsed = Date.now() - startTime;
+                const pct = Math.min(elapsed / fileTimeout, 1);
+                const color = pct > 0.8 ? RED : pct > 0.5 ? YELLOW : CYAN;
+                // "  ⏳ <relPath>  <elapsed> / <total> <bar>"
+                const prefix = `  \u23F3 ${relPath}  ${formatElapsed(elapsed)} / ${formatElapsed(fileTimeout)} `;
+                const cols = process.stdout.columns || 80;
+                // Reserve space for prefix + ANSI escape codes padding + 1 safety char
+                const barWidth = Math.max(10, cols - prefix.length - 1);
+                const filled = Math.round(pct * barWidth);
+                const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
+                process.stdout.write(`\r${color}${prefix}${bar}${RESET}`);
+            };
+            showTimer();
+            timerInterval = setInterval(showTimer, 250);
+        }
         const result = await runTestFile(testFile, {
             wptRoot,
             timeout: featureConfig.timeout || timeout,
@@ -489,6 +526,12 @@ export async function runWPT(feature, options = {}) {
             featureConfig,
             debug,
         });
+        // Clear the timer line
+        if (timerInterval) {
+            clearInterval(timerInterval);
+            const cols = process.stdout.columns || 120;
+            process.stdout.write(`\r${" ".repeat(cols)}\r`);
+        }
         const filePassCount = result.results.tests.filter((t) => t.status === 0).length;
         const fileFailCount = result.results.tests.filter((t) => t.status !== 0 && t.status !== 3).length;
         const total = result.results.tests.length;
