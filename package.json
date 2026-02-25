@@ -1,6 +1,6 @@
 {
   "name": "wpt-compliance",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Run web-platform-tests (WPT) against Bun/Node.js — downloads only the tests you need",
   "type": "module",
   "main": "./dist/index.js",
