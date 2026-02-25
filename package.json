@@ -4,10 +4,20 @@
   "description": "Run web-platform-tests (WPT) against Bun/Node.js — downloads only the tests you need",
   "type": "module",
   "main": "./src/index.js",
+  "types": "./src/index.d.ts",
   "exports": {
-    ".": "./src/index.js",
-    "./fetcher": "./src/fetcher.js",
-    "./runner": "./src/runner.js"
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./fetcher": {
+      "types": "./src/fetcher.d.ts",
+      "default": "./src/fetcher.js"
+    },
+    "./runner": {
+      "types": "./src/runner.d.ts",
+      "default": "./src/runner.js"
+    }
   },
   "bin": {
     "wpt": "./bin/cli.js"
