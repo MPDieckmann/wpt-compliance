@@ -1,0 +1,16 @@
+{
+  "name": "indexeddb-shim",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "fake-indexeddb": "^6.2.5",
+    "wpt-compliance": "../.."
+  }
+}
