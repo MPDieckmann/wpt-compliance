@@ -5,6 +5,15 @@ All notable changes to **wpt-compliance** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] — 2026-02-25
+
+### Fixed
+
+- **Global scope execution**: Replaced `new Function()` with indirect eval (`(0, eval)()`) so that `function` declarations in WPT scripts (e.g. `indexeddb_test`, `createdb_for_multiple_tests`) become true globals — matching browser top-level behaviour.
+- **Strict mode handling**: `'use strict'` directives are now stripped before eval, preventing function declarations from staying eval-local.
+- **`const`/`let` to `var` conversion**: Top-level `const` and `let` declarations in WPT scripts are automatically converted to `var` so they attach to the global scope via eval (e.g. `const createBooksStore` in `support-promises.js`).
+- **Unhandled async exceptions**: Added `process.on('uncaughtException')` and `process.on('unhandledRejection')` handlers during test file execution, preventing polyfills that throw asynchronous errors (e.g. `AggregateError` from `fake-indexeddb`) from crashing the entire process.
+
 ## [1.0.1] — 2026-02-25
 
 ### Fixed

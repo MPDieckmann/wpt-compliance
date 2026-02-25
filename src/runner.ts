@@ -208,6 +208,26 @@ export function parseMeta(source: string): TestMeta {
   return meta;
 }
 
+/**
+ * Prepare script source for execution in the global scope via indirect eval.
+ *
+ * 1. Strips `'use strict'` — in strict-mode eval, function declarations
+ *    stay eval-local instead of becoming global.
+ * 2. Converts top-level `const` and `let` to `var` — block-scoped
+ *    declarations in eval never become global properties, but `var` does.
+ *
+ * WPT scripts are meant to run at the top level of a browser page, so we
+ * need these transformations for correct global variable behaviour.
+ */
+function prepareForGlobalEval(source: string): string {
+  return source
+    // Remove 'use strict' directives
+    .replace(/^\s*['"]use strict['"]\s*;?/gm, "// (use strict removed for WPT runner)")
+    // Convert top-level const/let to var so they become global via eval
+    // Only matches declarations at the start of a line (top-level)
+    .replace(/^(const|let)\s+/gm, "var ");
+}
+
 // ─── File discovery ─────────────────────────────────────────────────────────
 
 /** Recursively find all `.any.js` test files in a directory. */
@@ -267,8 +287,30 @@ export async function runTestFile(
   const timeoutMs = meta.timeout === "long" ? timeout * 6 : timeout;
 
   return new Promise<RunTestFileResult>((resolveRun) => {
+    let settled = false;
+    function settle(result: RunTestFileResult) {
+      if (settled) return;
+      settled = true;
+      // Remove process-level handlers we installed for this test
+      process.removeListener("uncaughtException", onUncaughtException);
+      process.removeListener("unhandledRejection", onUnhandledRejection);
+      resolveRun(result);
+    }
+
+    // Catch async exceptions that escape our promise chain
+    // (e.g. AggregateError from polyfill event dispatchers)
+    function onUncaughtException(err: Error) {
+      if (debug) console.warn(`  ⚠ Uncaught exception during "${testName}": ${err.message}`);
+      // Don't crash — just swallow it so we can continue to the next test
+    }
+    function onUnhandledRejection(reason: any) {
+      if (debug) console.warn(`  ⚠ Unhandled rejection during "${testName}": ${reason}`);
+    }
+    process.on("uncaughtException", onUncaughtException);
+    process.on("unhandledRejection", onUnhandledRejection);
+
     const timer = setTimeout(() => {
-      resolveRun({
+      settle({
         file: testName,
         error: `Timeout after ${timeoutMs}ms`,
         results,
@@ -304,9 +346,8 @@ export async function runTestFile(
         };
       }
 
-      // testharness.js
-      const testharnessFunc = new Function(testharnessSource);
-      testharnessFunc.call(globalThis);
+      // testharness.js — use indirect eval to keep declarations global
+      (0, eval)(testharnessSource);
 
       // completion callback
       (globalThis as any).add_completion_callback(
@@ -320,7 +361,7 @@ export async function runTestFile(
           }));
           results.status = harnessStatus;
           results.asserts = asserts;
-          resolveRun({ file: testName, results, error: null });
+          settle({ file: testName, results, error: null });
         },
       );
 
@@ -358,8 +399,8 @@ export async function runTestFile(
           continue;
         }
         const scriptSource = readFileSync(resolvedPath, "utf-8");
-        const scriptFunc = new Function(scriptSource);
-        scriptFunc.call(globalThis);
+        // Indirect eval in sloppy mode so function declarations become global
+        (0, eval)(prepareForGlobalEval(scriptSource));
       }
 
       // Patch fetch for local files
@@ -417,9 +458,8 @@ export async function runTestFile(
         await featureConfig.setup({ testFilePath, testName, meta, globalThis });
       }
 
-      // Run the test
-      const testFunc = new Function(testSource);
-      testFunc.call(globalThis);
+      // Run the test — indirect eval in sloppy mode for global scope
+      (0, eval)(prepareForGlobalEval(testSource));
 
       await new Promise<void>((r) => setTimeout(r, 0));
 
@@ -431,7 +471,7 @@ export async function runTestFile(
 
     execute().catch((err: Error) => {
       clearTimeout(timer);
-      resolveRun({
+      settle({
         file: testName,
         error: err.message || String(err),
         results,
