@@ -6,7 +6,7 @@
 //   await fetchFeature("url");
 //   const results = await runTests("url", { debug: true });
 export { fetchFeature, listCachedFeatures } from "./fetcher.js";
-export { runWPT as runTests, runTestFile, parseMeta, findTestFiles } from "./runner.js";
+export { runWPT as runTests, runTestFile, parseMeta, findTestFiles, } from "./runner.js";
 import { fetchFeature } from "./fetcher.js";
 import { runWPT } from "./runner.js";
 import { resolve } from "path";

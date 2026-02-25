@@ -76,12 +76,12 @@ export function parseMeta(source) {
  * need these transformations for correct global variable behaviour.
  */
 function prepareForGlobalEval(source) {
-    return source
+    return (source
         // Remove 'use strict' directives
         .replace(/^\s*['"]use strict['"]\s*;?/gm, "// (use strict removed for WPT runner)")
         // Convert top-level const/let to var so they become global via eval
         // Only matches declarations at the start of a line (top-level)
-        .replace(/^(const|let)\s+/gm, "var ");
+        .replace(/^(const|let)\s+/gm, "var "));
 }
 // ─── File discovery ─────────────────────────────────────────────────────────
 /** Recursively find all `.any.js` test files in a directory. */
@@ -126,6 +126,34 @@ export async function runTestFile(testFilePath, options = {}) {
         asserts: [],
     };
     const timeoutMs = meta.timeout === "long" ? timeout * 6 : timeout;
+    // Track timers created during test execution so we can clean them up
+    const activeTimers = new Set();
+    const origSetTimeout = globalThis.setTimeout;
+    const origSetInterval = globalThis.setInterval;
+    const origClearTimeout = globalThis.clearTimeout;
+    const origClearInterval = globalThis.clearInterval;
+    globalThis.setTimeout = function trackedSetTimeout(...args) {
+        const id = origSetTimeout.apply(globalThis, args);
+        activeTimers.add(id);
+        return id;
+    };
+    globalThis.setInterval = function trackedSetInterval(...args) {
+        const id = origSetInterval.apply(globalThis, args);
+        activeTimers.add(id);
+        return id;
+    };
+    globalThis.clearTimeout = function trackedClearTimeout(id) {
+        if (id !== undefined)
+            activeTimers.delete(id);
+        return origClearTimeout.call(globalThis, id);
+    };
+    globalThis.clearInterval = function trackedClearInterval(id) {
+        if (id !== undefined)
+            activeTimers.delete(id);
+        return origClearInterval.call(globalThis, id);
+    };
+    // Save original fetch so we can restore it after the test
+    const originalFetch = globalThis.fetch;
     return new Promise((resolveRun) => {
         let settled = false;
         function settle(result) {
@@ -135,6 +163,19 @@ export async function runTestFile(testFilePath, options = {}) {
             // Remove process-level handlers we installed for this test
             process.removeListener("uncaughtException", onUncaughtException);
             process.removeListener("unhandledRejection", onUnhandledRejection);
+            // Clear any lingering timers from eval'd test code
+            for (const id of activeTimers) {
+                origClearTimeout(id);
+                origClearInterval(id);
+            }
+            activeTimers.clear();
+            // Restore original timer functions
+            globalThis.setTimeout = origSetTimeout;
+            globalThis.setInterval = origSetInterval;
+            globalThis.clearTimeout = origClearTimeout;
+            globalThis.clearInterval = origClearInterval;
+            // Restore original fetch
+            globalThis.fetch = originalFetch;
             resolveRun(result);
         }
         // Catch async exceptions that escape our promise chain
@@ -150,7 +191,8 @@ export async function runTestFile(testFilePath, options = {}) {
         }
         process.on("uncaughtException", onUncaughtException);
         process.on("unhandledRejection", onUnhandledRejection);
-        const timer = setTimeout(() => {
+        // Use original setTimeout for our own timer so it's not tracked/cleaned
+        const timer = origSetTimeout(() => {
             settle({
                 file: testName,
                 error: `Timeout after ${timeoutMs}ms`,
@@ -181,7 +223,7 @@ export async function runTestFile(testFilePath, options = {}) {
             (0, eval)(testharnessSource);
             // completion callback
             globalThis.add_completion_callback((tests, harnessStatus, asserts) => {
-                clearTimeout(timer);
+                origClearTimeout(timer);
                 results.tests = tests.map((t) => ({
                     name: t.name,
                     status: t.status,
@@ -227,7 +269,6 @@ export async function runTestFile(testFilePath, options = {}) {
                 (0, eval)(prepareForGlobalEval(scriptSource));
             }
             // Patch fetch for local files
-            const originalFetch = globalThis.fetch;
             globalThis.fetch = function patchedFetch(input, init) {
                 if (typeof input === "string" &&
                     !input.startsWith("http://") &&
@@ -284,7 +325,7 @@ export async function runTestFile(testFilePath, options = {}) {
             }
         }
         execute().catch((err) => {
-            clearTimeout(timer);
+            origClearTimeout(timer);
             settle({
                 file: testName,
                 error: err.message || String(err),
@@ -400,7 +441,7 @@ function cleanupGlobals(featureConfig = {}) {
  */
 export async function runWPT(feature, options = {}) {
     const { wptRoot = process.cwd(), files: fileArgs = [], filter = "", timeout = 30000, debug = false, continueOnFail = true, preload = [], config: featureConfig = {}, silent = false, } = options;
-    const log = silent ? (() => { }) : console.log.bind(console);
+    const log = silent ? () => { } : console.log.bind(console);
     const featurePath = resolve(wptRoot, feature);
     if (!existsSync(featurePath)) {
         throw new Error(`Feature directory not found: ${featurePath}`);

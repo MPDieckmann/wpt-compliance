@@ -13,7 +13,12 @@ export type {
   CachedFeatureInfo,
 } from "./fetcher.js";
 
-export { runWPT as runTests, runTestFile, parseMeta, findTestFiles } from "./runner.js";
+export {
+  runWPT as runTests,
+  runTestFile,
+  parseMeta,
+  findTestFiles,
+} from "./runner.js";
 export type {
   TestMeta,
   TestResult,

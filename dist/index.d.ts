@@ -1,6 +1,6 @@
 export { fetchFeature, listCachedFeatures } from "./fetcher.js";
 export type { FetchFeatureOptions, FetchFeatureResult, CachedFeatureInfo, } from "./fetcher.js";
-export { runWPT as runTests, runTestFile, parseMeta, findTestFiles } from "./runner.js";
+export { runWPT as runTests, runTestFile, parseMeta, findTestFiles, } from "./runner.js";
 export type { TestMeta, TestResult, HarnessStatus, TestFileResults, RunTestFileResult, RunTestFileOptions, RunWPTSummary, RunWPTOptions, FileResult, FeatureConfig, } from "./runner.js";
 import { type FeatureConfig } from "./runner.js";
 /**

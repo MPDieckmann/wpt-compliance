@@ -122,7 +122,7 @@ async function doRun(feature, files) {
     }
     else {
         // Try default config locations
-        for (const name of ["wpt.config.js", "wpt.config.mjs"]) {
+        for (const name of ["wpt.config.ts", "wpt.config.js", "wpt.config.mjs"]) {
             const path = resolve(process.cwd(), name);
             try {
                 featureConfig = await loadConfig(path, feature);
@@ -207,7 +207,9 @@ async function main() {
     });
     await doRun(feature, files);
 }
-main().catch((err) => {
+main().then(() => {
+    process.exit(0);
+}).catch((err) => {
     console.error(`\n❌ ${err.message}\n`);
     if (flags.debug && err.stack)
         console.error(err.stack);

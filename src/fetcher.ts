@@ -96,7 +96,10 @@ async function fetchJSON(url: string): Promise<any> {
   return res.json();
 }
 
-async function downloadFile(remotePath: string, localPath: string): Promise<string> {
+async function downloadFile(
+  remotePath: string,
+  localPath: string,
+): Promise<string> {
   const url = `${RAW_BASE}/${remotePath}`;
   const res = await fetch(url);
   if (!res.ok) {
@@ -111,7 +114,10 @@ async function downloadFile(remotePath: string, localPath: string): Promise<stri
 
 // ─── List directory contents recursively via GitHub API ─────────────────────
 
-async function listGitHubDir(remotePath: string, recursive = true): Promise<GitHubEntry[]> {
+async function listGitHubDir(
+  remotePath: string,
+  recursive = true,
+): Promise<GitHubEntry[]> {
   const data = await fetchJSON(
     `${API_BASE}/contents/${remotePath}?ref=${WPT_BRANCH}`,
   );
@@ -201,7 +207,9 @@ export async function fetchFeature(
 
   // Check if already downloaded (unless --force)
   if (!force && existsSync(manifestPath)) {
-    const manifest: WPTManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    const manifest: WPTManifest = JSON.parse(
+      readFileSync(manifestPath, "utf-8"),
+    );
     if (verbose) {
       console.log(
         `${DIM}Using cached WPT tests for "${feature}" (${manifest.files.length} files)${RESET}`,

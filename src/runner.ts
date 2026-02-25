@@ -220,12 +220,17 @@ export function parseMeta(source: string): TestMeta {
  * need these transformations for correct global variable behaviour.
  */
 function prepareForGlobalEval(source: string): string {
-  return source
-    // Remove 'use strict' directives
-    .replace(/^\s*['"]use strict['"]\s*;?/gm, "// (use strict removed for WPT runner)")
-    // Convert top-level const/let to var so they become global via eval
-    // Only matches declarations at the start of a line (top-level)
-    .replace(/^(const|let)\s+/gm, "var ");
+  return (
+    source
+      // Remove 'use strict' directives
+      .replace(
+        /^\s*['"]use strict['"]\s*;?/gm,
+        "// (use strict removed for WPT runner)",
+      )
+      // Convert top-level const/let to var so they become global via eval
+      // Only matches declarations at the start of a line (top-level)
+      .replace(/^(const|let)\s+/gm, "var ")
+  );
 }
 
 // ─── File discovery ─────────────────────────────────────────────────────────
@@ -286,6 +291,38 @@ export async function runTestFile(
 
   const timeoutMs = meta.timeout === "long" ? timeout * 6 : timeout;
 
+  // Track timers created during test execution so we can clean them up
+  const activeTimers = new Set<ReturnType<typeof setTimeout>>();
+  const origSetTimeout = globalThis.setTimeout;
+  const origSetInterval = globalThis.setInterval;
+  const origClearTimeout = globalThis.clearTimeout;
+  const origClearInterval = globalThis.clearInterval;
+
+  globalThis.setTimeout = function trackedSetTimeout(...args: Parameters<typeof setTimeout>) {
+    const id = origSetTimeout.apply(globalThis, args);
+    activeTimers.add(id);
+    return id;
+  } as typeof setTimeout;
+
+  globalThis.setInterval = function trackedSetInterval(...args: Parameters<typeof setInterval>) {
+    const id = origSetInterval.apply(globalThis, args);
+    activeTimers.add(id);
+    return id;
+  } as typeof setInterval;
+
+  globalThis.clearTimeout = function trackedClearTimeout(id?: ReturnType<typeof setTimeout>) {
+    if (id !== undefined) activeTimers.delete(id);
+    return origClearTimeout.call(globalThis, id);
+  } as typeof clearTimeout;
+
+  globalThis.clearInterval = function trackedClearInterval(id?: ReturnType<typeof setInterval>) {
+    if (id !== undefined) activeTimers.delete(id as any);
+    return origClearInterval.call(globalThis, id);
+  } as typeof clearInterval;
+
+  // Save original fetch so we can restore it after the test
+  const originalFetch = globalThis.fetch;
+
   return new Promise<RunTestFileResult>((resolveRun) => {
     let settled = false;
     function settle(result: RunTestFileResult) {
@@ -294,22 +331,40 @@ export async function runTestFile(
       // Remove process-level handlers we installed for this test
       process.removeListener("uncaughtException", onUncaughtException);
       process.removeListener("unhandledRejection", onUnhandledRejection);
+      // Clear any lingering timers from eval'd test code
+      for (const id of activeTimers) {
+        origClearTimeout(id);
+        origClearInterval(id as any);
+      }
+      activeTimers.clear();
+      // Restore original timer functions
+      globalThis.setTimeout = origSetTimeout;
+      globalThis.setInterval = origSetInterval;
+      globalThis.clearTimeout = origClearTimeout;
+      globalThis.clearInterval = origClearInterval;
+      // Restore original fetch
+      globalThis.fetch = originalFetch;
       resolveRun(result);
     }
 
     // Catch async exceptions that escape our promise chain
     // (e.g. AggregateError from polyfill event dispatchers)
     function onUncaughtException(err: Error) {
-      if (debug) console.warn(`  ⚠ Uncaught exception during "${testName}": ${err.message}`);
+      if (debug)
+        console.warn(
+          `  ⚠ Uncaught exception during "${testName}": ${err.message}`,
+        );
       // Don't crash — just swallow it so we can continue to the next test
     }
     function onUnhandledRejection(reason: any) {
-      if (debug) console.warn(`  ⚠ Unhandled rejection during "${testName}": ${reason}`);
+      if (debug)
+        console.warn(`  ⚠ Unhandled rejection during "${testName}": ${reason}`);
     }
     process.on("uncaughtException", onUncaughtException);
     process.on("unhandledRejection", onUnhandledRejection);
 
-    const timer = setTimeout(() => {
+    // Use original setTimeout for our own timer so it's not tracked/cleaned
+    const timer = origSetTimeout(() => {
       settle({
         file: testName,
         error: `Timeout after ${timeoutMs}ms`,
@@ -352,7 +407,7 @@ export async function runTestFile(
       // completion callback
       (globalThis as any).add_completion_callback(
         (tests: any[], harnessStatus: any, asserts: any[]) => {
-          clearTimeout(timer);
+          origClearTimeout(timer);
           results.tests = tests.map((t) => ({
             name: t.name,
             status: t.status,
@@ -404,7 +459,6 @@ export async function runTestFile(
       }
 
       // Patch fetch for local files
-      const originalFetch = globalThis.fetch;
       globalThis.fetch = function patchedFetch(
         input: string | URL | Request,
         init?: RequestInit,
@@ -470,7 +524,7 @@ export async function runTestFile(
     }
 
     execute().catch((err: Error) => {
-      clearTimeout(timer);
+      origClearTimeout(timer);
       settle({
         file: testName,
         error: err.message || String(err),
@@ -602,7 +656,7 @@ export async function runWPT(
     silent = false,
   } = options;
 
-  const log = silent ? (() => {}) : console.log.bind(console);
+  const log = silent ? () => {} : console.log.bind(console);
 
   const featurePath = resolve(wptRoot, feature);
   if (!existsSync(featurePath)) {
